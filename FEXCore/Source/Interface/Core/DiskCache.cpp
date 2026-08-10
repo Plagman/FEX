@@ -2,9 +2,12 @@
 
 #include "FEXCore/Core/DiskCache.h"
 #include "FEXCore/Utils/LogManager.h"
+#include "Interface/Context/Context.h"
+#include "FEXCore/HLE/SyscallHandler.h"
 #include "FEXCore/Utils/File.h"
 #include "FEXCore/fextl/memory.h"
 #include <cstdint>
+#include <cstring>
 #include <xxhash.h>
 
 namespace FEXCore {
@@ -105,6 +108,20 @@ bool DiskCacheFOZFile::ReadNextBlob(foz_payload_key &OutKey, foz_payload_header 
     return true;
 }
 
+bool DiskCacheFOZFile::ReadBlob(uint64_t Offset, std::span<uint8_t> OutBlob) {
+    ReadyForAppend = false;
+
+    ssize_t SeekRet = FD->Seek(Offset, File::SeekOp::BEGIN);
+    if (SeekRet < 0) {
+        return false;
+    }
+    if (FD->Read(OutBlob.data(), OutBlob.size()) != (ssize_t)OutBlob.size()) {
+        return false;
+    }
+
+    return true;
+}
+
 bool DiskCacheFOZFile::WriteBlob(const foz_payload_key &Key, std::span<const std::span<const uint8_t>> BlobChunks, uint64_t &OutBlobOffset) {
     if (!ReadyForAppend) {
         ssize_t SeekRet = FD->Seek(0, File::SeekOp::END);
@@ -182,6 +199,10 @@ void DiskCacheIndexedDB::PopulateIndex(DiskCacheIndex &CacheIndex) {
     // could truncate/delete index if we don't end up perfectly at end here
 }
 
+bool DiskCacheIndexedDB::ReadCacheBlob(uint64_t Offset, std::span<uint8_t> OutBlob) {
+    return CacheFOZ.ReadBlob(Offset, OutBlob);
+}
+
 bool DiskCacheIndexedDB::StoreCacheBlob(const foz_payload_key &Key, std::span<const std::span<const uint8_t>> BlobChunks, DiskCacheIndex &CacheIndex) {
     if (ReadOnly) {
         // shouldn't happen
@@ -252,12 +273,67 @@ bool DiskCache::OpenCacheDB(const fextl::string &CacheDBName, bool ReadOnly) {
     return true;
 }
 
-void DiskCache::Init() {
-    // todo pass contextimpl in there so we can compute some kind of baked options to hash in?
-    LogMan::Msg::IFmt("DiskCache::Init");
+void DiskCache::Init(FEXCore::Context::ContextImpl *CTX) {
+    this->CTX = CTX;
 
+    // todo get those paths / enablement from options, etc
     fextl::string CacheBaseName = "fex_disk_cache";
     OpenCacheDB(CacheBaseName, false);
+
+    // todo grab all CTX options that can change compilation here and bake somewhere
+}
+
+std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState* Thread, const ExecutableFileSectionInfo& Region, uint64_t GuestRIP) {
+    uint64_t ModuleOffset = GuestRIP - Region.FileStartVA;
+
+    // todo move key making to a helper once we have options and stuff (see Store)
+    foz_payload_key Key = {};
+    memcpy(Key.bytes, &ModuleOffset, sizeof(ModuleOffset));
+
+    uint64_t Hash = XXH3_64bits(Key.bytes, FOSSILIZE_BLOB_HASH_LENGTH);
+    auto CacheIndexIt = CacheIndex.find(Hash);
+    if (CacheIndexIt == CacheIndex.end()) {
+        // definite miss
+        return std::nullopt;
+    }
+    const CacheIndexEntry& Entry = CacheIndexIt->second;
+    // found a key hash match, could still be a miss, read the blob and verify more
+    DiskCacheCodeHitData HitData;
+    HitData.Blob.resize(Entry.Size);
+    if (!Entry.DB->ReadCacheBlob(Entry.Offset, HitData.Blob)) {
+        return std::nullopt;
+    }
+
+    uint32_t SizeNeeded = 0;
+    uint32_t GuestSize;
+    XXH128_hash_t GuestHash;
+    uint32_t HostSize;
+    uint32_t EntryPointCount;
+    SizeNeeded += sizeof(GuestSize) + sizeof(GuestHash) + sizeof(HostSize) + sizeof(EntryPointCount);
+    if (Entry.Size < SizeNeeded) {
+        return std::nullopt;
+    }
+    memcpy(&GuestSize, HitData.Blob.data(), sizeof(GuestSize));
+    memcpy(&GuestHash, HitData.Blob.data() + sizeof(GuestSize), sizeof(GuestHash));
+
+    auto RangeInfo = CTX->SyscallHandler->QueryGuestExecutableRange(Thread, GuestRIP);
+    if (RangeInfo.Size == 0 || RangeInfo.Base > GuestRIP) {
+        return std::nullopt;
+    }
+    uint64_t Available = RangeInfo.Base + RangeInfo.Size - GuestRIP;
+    if (Available < GuestSize) {
+        return std::nullopt;
+    }
+
+    SizeNeeded += GuestSize;
+    if (Entry.Size < SizeNeeded) {
+        return std::nullopt;
+    }
+
+    memcpy(&HostSize, HitData.Blob.data() + sizeof(GuestSize) + sizeof(GuestHash) + sizeof(HostSize), sizeof(HostSize));
+    // etc etc...
+
+    return HitData;
 }
 
 bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP, std::span<const uint8_t> GuestCode,
@@ -268,9 +344,9 @@ bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP
 
     uint64_t ModuleOffset = GuestRIP - Region.FileStartVA;
 
-    foz_payload_key Key = {};
-    std::memcpy(Key.bytes, &ModuleOffset, sizeof(ModuleOffset));
     // todo also copy/hash options that affect codegen into the key
+    foz_payload_key Key = {};
+    memcpy(Key.bytes, &ModuleOffset, sizeof(ModuleOffset));
 
     uint32_t GuestSize = (uint32_t)GuestCode.size();
     XXH128_hash_t GuestHash = XXH3_128bits(GuestCode.data(), GuestCode.size());

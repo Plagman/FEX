@@ -104,8 +104,8 @@ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
   // Track atomic TSO emulation configuration.
   UpdateAtomicTSOEmulationConfig();
 
-  // option or something
-  DiskCache.Init();
+  // todo option or something - maybe in the impl
+  DiskCache.Init(this);
 }
 
 struct GetFrameBlockInfoResult {
@@ -944,6 +944,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
   // Disk Cache
   std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
   if (Region && Region->FileStartVA != 0) {
+    // todo i guess we also need to serialize codepages above for smc detection
     DiskCache.Store(*Region, GuestRIP, std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(StartAddr), Length},
                     std::span<const uint8_t>{CompiledCode.BlockBegin, CompiledCode.Size}, EntryPoints);
 
