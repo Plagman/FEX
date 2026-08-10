@@ -305,6 +305,7 @@ std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState*
     }
 
     uint32_t SizeNeeded = 0;
+
     uint32_t GuestSize;
     XXH128_hash_t GuestHash;
     uint32_t HostSize;
@@ -313,9 +314,14 @@ std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState*
     if (Entry.Size < SizeNeeded) {
         return std::nullopt;
     }
+    // if we survived this, we know have enough to read the dynamic sizes, at least
+    // we can't read them directly off of HitData because they might be unaligned?
     memcpy(&GuestSize, HitData.Blob.data(), sizeof(GuestSize));
     memcpy(&GuestHash, HitData.Blob.data() + sizeof(GuestSize), sizeof(GuestHash));
+    memcpy(&HostSize, HitData.Blob.data() + sizeof(GuestSize) + sizeof(GuestHash), sizeof(HostSize));
+    memcpy(&EntryPointCount, HitData.Blob.data() + sizeof(GuestSize) + sizeof(GuestHash) + sizeof(HostSize), sizeof(EntryPointCount));
 
+    // do we have enough room in our live code to even hash GuestSize worth?
     auto RangeInfo = CTX->SyscallHandler->QueryGuestExecutableRange(Thread, GuestRIP);
     if (RangeInfo.Size == 0 || RangeInfo.Base > GuestRIP) {
         return std::nullopt;
@@ -325,13 +331,21 @@ std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState*
         return std::nullopt;
     }
 
-    SizeNeeded += GuestSize;
+    XXH128_hash_t LiveGuestHash = XXH3_128bits(reinterpret_cast<void *>(GuestRIP), GuestSize);
+    if (std::memcmp(&LiveGuestHash, &GuestHash, sizeof(GuestHash)) != 0) {
+        LogMan::Msg::IFmt("hash mismatch! length {:d}", GuestSize);
+        return std::nullopt;
+    }
+    LogMan::Msg::IFmt("hash ok! length {:d}", GuestSize);
+
+    HitData.HostCode = {HitData.Blob.data() + SizeNeeded, HostSize};
+    HitData.EntryPoints = {reinterpret_cast<const DiskCacheBlobEntryPoint*>(HitData.Blob.data() + SizeNeeded + HostSize), EntryPointCount};
+
+    // this seems to be a full hit, lastly, check the entry is big enough to have cached host code and other vital metadata
+    SizeNeeded += HostSize + EntryPointCount * sizeof(DiskCacheBlobEntryPoint);
     if (Entry.Size < SizeNeeded) {
         return std::nullopt;
     }
-
-    memcpy(&HostSize, HitData.Blob.data() + sizeof(GuestSize) + sizeof(GuestHash) + sizeof(HostSize), sizeof(HostSize));
-    // etc etc...
 
     return HitData;
 }
@@ -345,6 +359,7 @@ bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP
     uint64_t ModuleOffset = GuestRIP - Region.FileStartVA;
 
     // todo also copy/hash options that affect codegen into the key
+    // todo should try to keep the key ascii i think?
     foz_payload_key Key = {};
     memcpy(Key.bytes, &ModuleOffset, sizeof(ModuleOffset));
 
@@ -356,11 +371,11 @@ bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP
     std::span<const uint8_t> CacheBlobChunks[] = {
         {(const uint8_t*)&GuestSize, sizeof(GuestSize)},
         {(const uint8_t*)&GuestHash, sizeof(GuestHash)},
-        GuestCode,
         {(const uint8_t*)&HostSize, sizeof(HostSize)},
-        HostCode,
         {(const uint8_t*)&EntryPointCount, sizeof(EntryPointCount)},
-        {(const uint8_t*)EntryPoints.data(), EntryPoints.size() * sizeof(DiskCacheBlobEntryPoint)},
+        HostCode,
+        {(const uint8_t*)EntryPoints.data(), EntryPointCount * sizeof(DiskCacheBlobEntryPoint)},
+        GuestCode,
     };
 
     return RWCacheDB->StoreCacheBlob(Key, CacheBlobChunks, CacheIndex);

@@ -1153,6 +1153,41 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
   return std::move(CodeData);
 }
 
+CPUBackend::CompiledCode Arm64JITCore::LoadCachedCode(std::span<const uint8_t> HostBytes,
+                                                      std::span<const DiskCacheBlobEntryPoint> EntryPoints) {
+  std::unique_lock CodeBufferLock{SharedCodeBuffers.CodeBufferWriteMutex};
+
+  if (auto Prev = CheckCodeBufferUpdate()) {
+    Allocator::VirtualDontNeed(ThreadState->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
+    auto lk = ThreadState->LookupCache->AcquireWriteLock();
+    ThreadState->LookupCache->ChangeGuestToHostMapping(*Prev, *CurrentCodeBuffer->LookupCache, lk);
+  }
+
+  SetBuffer(CurrentCodeBuffer->Ptr, CurrentCodeBuffer->AllocatedSize);
+  SetCursorOffset(SharedCodeBuffers.LatestOffset);
+  Align16B();
+
+  // todo we should ask for more size here instead of failing out and forcing a fallback to normal compile
+  if (GetCursorOffset() + HostBytes.size() > CurrentCodeBuffer->UsableSize()) {
+    return {};
+  }
+
+  uint8_t* Dest = GetCursorAddress<uint8_t*>();
+  memcpy(Dest, HostBytes.data(), HostBytes.size());
+  SetCursorOffset(SharedCodeBuffers.LatestOffset + HostBytes.size());
+  SharedCodeBuffers.LatestOffset = GetCursorOffset();
+
+  ClearICache(Dest, HostBytes.size());
+
+  CPUBackend::CompiledCode Result;
+  Result.BlockBegin = Dest;
+  Result.Size = HostBytes.size();
+  for (const auto& Ep : EntryPoints) {
+    Result.EntryPoints[Ep.GuestRIP] = Dest + Ep.HostOffset;
+  }
+  return Result;
+}
+
 void Arm64JITCore::ResetStack() {
   if (SpillSlots == 0) {
     return;

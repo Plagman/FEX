@@ -861,6 +861,26 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
     return HostCode;
   }
 
+  std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
+  if (Region && Region->FileStartVA != 0) {
+    if (auto Hit = DiskCache.Lookup(Thread, *Region, GuestRIP)) {
+      // LogMan::Msg::IFmt("L4 hit rip=0x{:x} num_entries={}", GuestRIP, Hit->EntryPoints.size());
+      // for (const auto& E : Hit->EntryPoints) {
+      //   LogMan::Msg::IFmt("  entry: rip=0x{:x} hostoff={}", E.GuestRIP, E.HostOffset);
+      // }
+      auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode, Hit->EntryPoints);
+      if (LoadedCode.BlockBegin) {
+        fextl::vector<uint64_t> CodePages;
+        for (auto [GuestOffset, HostAddr] : LoadedCode.EntryPoints) {
+          Thread->LookupCache->AddBlockMapping(Thread, GuestOffset + Region->FileStartVA, CodePages, HostAddr);
+        }
+        uint64_t ModuleOffset = GuestRIP - Region->FileStartVA;
+        //LogMan::Msg::IFmt("cache hit {:p}", (void*)LoadedCode.EntryPoints[ModuleOffset]);
+        return reinterpret_cast<uintptr_t>(LoadedCode.EntryPoints[ModuleOffset]);
+      }
+    }
+  }
+
   // Accumulate a JIT count now, as even if another thread raced us, it should count as a compile.
   FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedJITCount, 1);
 
@@ -872,6 +892,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
     // DebugData wasn't populated, indicating another thread raced us for compiling this block
     return reinterpret_cast<uintptr_t>(CodePtr);
   }
+
+  // if this ever fires, we need to serialize the offset into disk cache
+  LOGMAN_THROW_A_FMT(StartAddr == GuestRIP, "StartAddr offset from GuestRIP");
 
   // The core managed to compile the code.
   if (Config.BlockJITNaming()) {
@@ -932,21 +955,20 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
     }
   }
 
-  fextl::vector<FEXCore::DiskCacheBlobEntryPoint> EntryPoints;
-  EntryPoints.reserve(CompiledCode.EntryPoints.size());
+  fextl::vector<FEXCore::DiskCacheBlobEntryPoint> CacheEntryPoints;
+  CacheEntryPoints.reserve(CompiledCode.EntryPoints.size());
 
   // Insert to lookup cache
   for (auto [GuestAddr, HostAddr] : CompiledCode.EntryPoints) {
     Thread->LookupCache->AddBlockMapping(Thread, GuestAddr, CodePages, HostAddr);
-    EntryPoints.push_back({GuestAddr, uint32_t(HostAddr - CompiledCode.BlockBegin)});
+    CacheEntryPoints.push_back({GuestAddr - Region->FileStartVA, uint32_t(HostAddr - CompiledCode.BlockBegin)});
   }
 
   // Disk Cache
-  std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
   if (Region && Region->FileStartVA != 0) {
     // todo i guess we also need to serialize codepages above for smc detection
     DiskCache.Store(*Region, GuestRIP, std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(StartAddr), Length},
-                    std::span<const uint8_t>{CompiledCode.BlockBegin, CompiledCode.Size}, EntryPoints);
+                    std::span<const uint8_t>{CompiledCode.BlockBegin, CompiledCode.Size}, CacheEntryPoints);
 
     if (CodeMapWriter) {
         CodeMapWriter->AppendBlock(*Region, GuestRIP);
