@@ -103,6 +103,9 @@ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
 
   // Track atomic TSO emulation configuration.
   UpdateAtomicTSOEmulationConfig();
+
+  // option or something
+  DiskCache.Init();
 }
 
 struct GetFrameBlockInfoResult {

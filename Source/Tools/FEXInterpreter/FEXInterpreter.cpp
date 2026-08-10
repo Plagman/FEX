@@ -435,6 +435,7 @@ int main(int argc, char** argv, char** const envp) {
   FEX_CONFIG_OPT(HostEnvironment, HOSTENV);
 
   FEX::Logging::Init();
+  LogMan::Msg::IFmt("pl test\n");
 
   if (StartupSleep() && (StartupSleepProcName().empty() || Program.ProgramName == StartupSleepProcName())) {
     LogMan::Msg::IFmt("[{}][{}] Sleeping for {} seconds", ::getpid(), Program.ProgramName, StartupSleep());
