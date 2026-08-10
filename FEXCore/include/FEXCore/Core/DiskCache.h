@@ -7,7 +7,7 @@
 #include <FEXCore/fextl/robin_map.h>
 #include <FEXCore/fextl/vector.h>
 #include <stdint.h>
-#include <xxhash.h>
+#include <span>
 
 #define FOSSILIZE_BLOB_HASH_LENGTH 40 /* SHA1 hexadecimal string length */
 
@@ -23,17 +23,6 @@ enum {
 
 struct __attribute__((packed)) foz_payload_key {
     uint8_t bytes[FOSSILIZE_BLOB_HASH_LENGTH];
-
-    bool operator==(const foz_payload_key& other) const {
-        return std::memcmp(bytes, other.bytes, FOSSILIZE_BLOB_HASH_LENGTH) == 0;
-    }
-};
-
-template<>
-struct std::hash<foz_payload_key> {
-    std::size_t operator()(const foz_payload_key& k) const noexcept {
-        return XXH3_64bits(k.bytes, FOSSILIZE_BLOB_HASH_LENGTH);
-    }
 };
 
 struct __attribute__((packed)) foz_payload_header {
@@ -45,6 +34,16 @@ struct __attribute__((packed)) foz_payload_header {
 
 namespace FEXCore {
 
+class DiskCacheIndexedDB;
+
+struct CacheIndexEntry {
+    DiskCacheIndexedDB *DB;
+    uint64_t Offset;
+    uint32_t Size;
+};
+
+using DiskCacheIndex = fextl::robin_map<uint64_t, CacheIndexEntry>;
+
 class DiskCacheFOZFile {
     bool OpenExisting();
     bool CreateNew();
@@ -53,8 +52,11 @@ class DiskCacheFOZFile {
     fextl::unique_ptr<File::File> FD;
     bool ReadOnly = false;
     bool ReadyForAppend = false;
+    uint64_t AppendCursor = 0;
 public:
     bool Open(const fextl::string &CacheFileName, bool ReadOnly);
+    bool ReadNextBlob(foz_payload_key &OutKey, foz_payload_header &OutHeader, fextl::vector<uint8_t> &OutBlob);
+    bool WriteBlob(const foz_payload_key &Key, std::span<const uint8_t> Blob, uint64_t &OutBlobOffset);
 };
 
 class DiskCacheIndexedDB {
@@ -63,15 +65,9 @@ class DiskCacheIndexedDB {
     bool ReadOnly = false;
 public:
     bool Open(const fextl::string &CacheDBName, bool ReadOnly);
+    void PopulateIndex(DiskCacheIndex &CacheIndex);
+    bool StoreCacheBlob(const foz_payload_key &Key, std::span<const uint8_t> Blob, DiskCacheIndex &CacheIndex);
 };
-
-struct CacheEntry {
-    DiskCacheIndexedDB *DB;
-    uint64_t Offset;
-    uint64_t Size;
-};
-
-using DiskCacheIndex = fextl::robin_map<foz_payload_key, CacheEntry>;
 
 class DiskCache {
     fextl::vector<fextl::unique_ptr<DiskCacheIndexedDB>> ROCacheDBs;
