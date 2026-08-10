@@ -105,7 +105,7 @@ bool DiskCacheFOZFile::ReadNextBlob(foz_payload_key &OutKey, foz_payload_header 
     return true;
 }
 
-bool DiskCacheFOZFile::WriteBlob(const foz_payload_key &Key, std::span<const uint8_t> Blob, uint64_t &OutBlobOffset) {
+bool DiskCacheFOZFile::WriteBlob(const foz_payload_key &Key, std::span<const std::span<const uint8_t>> BlobChunks, uint64_t &OutBlobOffset) {
     if (!ReadyForAppend) {
         ssize_t SeekRet = FD->Seek(0, File::SeekOp::END);
         if (SeekRet < 0) {
@@ -120,11 +120,16 @@ bool DiskCacheFOZFile::WriteBlob(const foz_payload_key &Key, std::span<const uin
     }
     AppendCursor += sizeof(Key.bytes);
 
+    uint64_t TotalBlobSize = 0;
+    for (const std::span<const uint8_t> &Chunk : BlobChunks) {
+        TotalBlobSize += Chunk.size();
+    }
+
     foz_payload_header ScratchHeader {
-        .payload_size = (uint32_t)Blob.size(),
+        .payload_size = (uint32_t)TotalBlobSize,
         .format = FOSSILIZE_COMPRESSION_NONE,
         .crc = 0, // todo? maybe
-        .uncompressed_size = (uint32_t)Blob.size()
+        .uncompressed_size = (uint32_t)TotalBlobSize
     };
 
     if (FD->Write(&ScratchHeader, sizeof(ScratchHeader)) != sizeof(ScratchHeader)) {
@@ -134,10 +139,15 @@ bool DiskCacheFOZFile::WriteBlob(const foz_payload_key &Key, std::span<const uin
 
     OutBlobOffset = AppendCursor;
 
-    if (FD->Write(Blob.data(), Blob.size()) != (ssize_t)Blob.size()) {
-        return false;
+    for (const std::span<const uint8_t> &Chunk : BlobChunks) {
+        if (Chunk.size() == 0) {
+            continue;
+        }
+        if (FD->Write(Chunk.data(), Chunk.size()) != (ssize_t)Chunk.size()) {
+            return false;
+        }
+        AppendCursor += Chunk.size();
     }
-    AppendCursor += Blob.size();
 
     return true;
 }
@@ -172,7 +182,7 @@ void DiskCacheIndexedDB::PopulateIndex(DiskCacheIndex &CacheIndex) {
     // could truncate/delete index if we don't end up perfectly at end here
 }
 
-bool DiskCacheIndexedDB::StoreCacheBlob(const foz_payload_key &Key, std::span<const uint8_t> Blob, DiskCacheIndex &CacheIndex) {
+bool DiskCacheIndexedDB::StoreCacheBlob(const foz_payload_key &Key, std::span<const std::span<const uint8_t>> BlobChunks, DiskCacheIndex &CacheIndex) {
     if (ReadOnly) {
         // shouldn't happen
         return false;
@@ -185,24 +195,31 @@ bool DiskCacheIndexedDB::StoreCacheBlob(const foz_payload_key &Key, std::span<co
 
     // write cache side first so we get offset for index
     uint64_t BlobOffset = 0;
-    if (!CacheFOZ.WriteBlob(Key, Blob, BlobOffset)) {
+    if (!CacheFOZ.WriteBlob(Key, BlobChunks, BlobOffset)) {
         return false;
+    }
+
+    uint64_t TotalBlobSize = 0;
+    for (const std::span<const uint8_t> &Chunk : BlobChunks) {
+        TotalBlobSize += Chunk.size();
     }
 
     mesa_index_db_file_entry IndexEntry {
         .hash = Hash,
-        .size = (uint32_t)Blob.size(),
+        .size = (uint32_t)TotalBlobSize,
         .last_access_time = 0, // todo..
         .cache_db_file_offset = BlobOffset
     };
 
-    std::span<const uint8_t> IndexBlob((const uint8_t*)&IndexEntry, sizeof(IndexEntry));
+    std::span<const uint8_t> IndexBlobChunks[] = {
+        {(const uint8_t*)&IndexEntry, sizeof(IndexEntry)}
+    };
     uint64_t UnusedIndexBlobOffset = 0;
-    if (!IndexFOZ.WriteBlob(Key, IndexBlob, UnusedIndexBlobOffset)) {
+    if (!IndexFOZ.WriteBlob(Key, IndexBlobChunks, UnusedIndexBlobOffset)) {
         return false;
     }
 
-    CacheIndex[Hash] = {this, BlobOffset, (uint32_t)Blob.size()};
+    CacheIndex[Hash] = {this, BlobOffset, (uint32_t)TotalBlobSize};
     return true;
 }
 

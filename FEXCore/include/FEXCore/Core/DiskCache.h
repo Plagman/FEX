@@ -56,7 +56,7 @@ class DiskCacheFOZFile {
 public:
     bool Open(const fextl::string &CacheFileName, bool ReadOnly);
     bool ReadNextBlob(foz_payload_key &OutKey, foz_payload_header &OutHeader, fextl::vector<uint8_t> &OutBlob);
-    bool WriteBlob(const foz_payload_key &Key, std::span<const uint8_t> Blob, uint64_t &OutBlobOffset);
+    bool WriteBlob(const foz_payload_key &Key, std::span<const std::span<const uint8_t>> BlobChunks, uint64_t &OutBlobOffset);
 };
 
 class DiskCacheIndexedDB {
@@ -66,7 +66,7 @@ class DiskCacheIndexedDB {
 public:
     bool Open(const fextl::string &CacheDBName, bool ReadOnly);
     void PopulateIndex(DiskCacheIndex &CacheIndex);
-    bool StoreCacheBlob(const foz_payload_key &Key, std::span<const uint8_t> Blob, DiskCacheIndex &CacheIndex);
+    bool StoreCacheBlob(const foz_payload_key &Key, std::span<const std::span<const uint8_t>> BlobChunks, DiskCacheIndex &CacheIndex);
 };
 
 class DiskCache {
