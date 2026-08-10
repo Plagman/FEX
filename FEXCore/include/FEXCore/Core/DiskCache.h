@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "FEXCore/Core/CodeCache.h"
 #include "FEXCore/Utils/File.h"
 #include "FEXCore/fextl/memory.h"
 #include <FEXCore/fextl/string.h>
@@ -8,6 +9,8 @@
 #include <FEXCore/fextl/vector.h>
 #include <stdint.h>
 #include <span>
+
+namespace FEXCore {
 
 #define FOSSILIZE_BLOB_HASH_LENGTH 40 /* SHA1 hexadecimal string length */
 
@@ -32,14 +35,17 @@ struct __attribute__((packed)) foz_payload_header {
   uint32_t uncompressed_size;
 };
 
-namespace FEXCore {
-
 class DiskCacheIndexedDB;
 
 struct CacheIndexEntry {
     DiskCacheIndexedDB *DB;
     uint64_t Offset;
     uint32_t Size;
+};
+
+struct __attribute__((packed)) DiskCacheBlobEntryPoint {
+    uint64_t GuestRIP;
+    uint32_t HostOffset;
 };
 
 using DiskCacheIndex = fextl::robin_map<uint64_t, CacheIndexEntry>;
@@ -76,6 +82,8 @@ class DiskCache {
     bool OpenCacheDB(const fextl::string &CacheDBName, bool ReadOnly);
 public:
     void Init();
+    bool Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP, std::span<const uint8_t> GuestCode,
+               std::span<const uint8_t> HostCode, std::span<const DiskCacheBlobEntryPoint> EntryPoints);
 };
 
 }

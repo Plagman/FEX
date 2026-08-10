@@ -241,6 +241,8 @@ bool DiskCache::OpenCacheDB(const fextl::string &CacheDBName, bool ReadOnly) {
         return false;
     }
 
+    CurDB->PopulateIndex(CacheIndex);
+
     if (ReadOnly) {
         ROCacheDBs.push_back(std::move(CurDB));
     } else {
@@ -251,10 +253,41 @@ bool DiskCache::OpenCacheDB(const fextl::string &CacheDBName, bool ReadOnly) {
 }
 
 void DiskCache::Init() {
+    // todo pass contextimpl in there so we can compute some kind of baked options to hash in?
     LogMan::Msg::IFmt("DiskCache::Init");
 
     fextl::string CacheBaseName = "fex_disk_cache";
     OpenCacheDB(CacheBaseName, false);
+}
+
+bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP, std::span<const uint8_t> GuestCode,
+                      std::span<const uint8_t> HostCode, std::span<const DiskCacheBlobEntryPoint> EntryPoints) {
+    if (!RWCacheDB) {
+        return false;
+    }
+
+    uint64_t ModuleOffset = GuestRIP - Region.FileStartVA;
+
+    foz_payload_key Key = {};
+    std::memcpy(Key.bytes, &ModuleOffset, sizeof(ModuleOffset));
+    // todo also copy/hash options that affect codegen into the key
+
+    uint32_t GuestSize = (uint32_t)GuestCode.size();
+    XXH128_hash_t GuestHash = XXH3_128bits(GuestCode.data(), GuestCode.size());
+    uint32_t HostSize = (uint32_t)HostCode.size();
+    uint32_t EntryPointCount = (uint32_t)EntryPoints.size();
+
+    std::span<const uint8_t> CacheBlobChunks[] = {
+        {(const uint8_t*)&GuestSize, sizeof(GuestSize)},
+        {(const uint8_t*)&GuestHash, sizeof(GuestHash)},
+        GuestCode,
+        {(const uint8_t*)&HostSize, sizeof(HostSize)},
+        HostCode,
+        {(const uint8_t*)&EntryPointCount, sizeof(EntryPointCount)},
+        {(const uint8_t*)EntryPoints.data(), EntryPoints.size() * sizeof(DiskCacheBlobEntryPoint)},
+    };
+
+    return RWCacheDB->StoreCacheBlob(Key, CacheBlobChunks, CacheIndex);
 }
 
 }

@@ -932,16 +932,23 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
     }
   }
 
-  // Insert to lookup cache
+  fextl::vector<FEXCore::DiskCacheBlobEntryPoint> EntryPoints;
+  EntryPoints.reserve(CompiledCode.EntryPoints.size());
 
+  // Insert to lookup cache
   for (auto [GuestAddr, HostAddr] : CompiledCode.EntryPoints) {
     Thread->LookupCache->AddBlockMapping(Thread, GuestAddr, CodePages, HostAddr);
+    EntryPoints.push_back({GuestAddr, uint32_t(HostAddr - CompiledCode.BlockBegin)});
   }
 
-  if (CodeMapWriter) {
-    auto Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
-    if (Region && Region->FileStartVA != 0) {
-      CodeMapWriter->AppendBlock(*Region, GuestRIP);
+  // Disk Cache
+  std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
+  if (Region && Region->FileStartVA != 0) {
+    DiskCache.Store(*Region, GuestRIP, std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(StartAddr), Length},
+                    std::span<const uint8_t>{CompiledCode.BlockBegin, CompiledCode.Size}, EntryPoints);
+
+    if (CodeMapWriter) {
+        CodeMapWriter->AppendBlock(*Region, GuestRIP);
     }
   }
 
