@@ -286,6 +286,7 @@ std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState*
     if (!IsReadingDiskCache()) {
         return std::nullopt;
     }
+    std::lock_guard Guard(Lock);
     uint64_t ModuleOffset = GuestRIP - Region.FileStartVA;
 
     // todo move key making to a helper once we have options and stuff (see Store)
@@ -382,6 +383,7 @@ bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP
     if (!IsWritingDiskCache()) {
         return false;
     }
+    std::lock_guard Guard(Lock);
 
     // pack entrypoints to disk format
     fextl::vector<DiskCacheBlobEntryPoint> CacheEntryPoints;

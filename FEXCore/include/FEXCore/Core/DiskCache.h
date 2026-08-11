@@ -11,6 +11,7 @@
 #include <FEXCore/fextl/robin_map.h>
 #include <FEXCore/fextl/vector.h>
 #include <stdint.h>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <xxhash.h>
@@ -139,6 +140,7 @@ class DiskCache {
     fextl::vector<fextl::unique_ptr<DiskCacheIndexedDB>> ROCacheDBs;
     fextl::unique_ptr<DiskCacheIndexedDB> RWCacheDB;
     DiskCacheIndex CacheIndex;
+    std::mutex Lock;
 
     bool OpenCacheDB(const fextl::string &CacheDBName, bool ReadOnly);
 public:
