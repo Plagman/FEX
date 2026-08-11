@@ -8,7 +8,6 @@
 #include "FEXCore/fextl/memory.h"
 #include <cstdint>
 #include <cstring>
-#include <xxhash.h>
 
 namespace FEXCore {
 
@@ -284,6 +283,9 @@ void DiskCache::Init(FEXCore::Context::ContextImpl *CTX) {
 }
 
 std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState* Thread, const ExecutableFileSectionInfo& Region, uint64_t GuestRIP) {
+    if (!IsReadingDiskCache()) {
+        return std::nullopt;
+    }
     uint64_t ModuleOffset = GuestRIP - Region.FileStartVA;
 
     // todo move key making to a helper once we have options and stuff (see Store)
@@ -304,22 +306,11 @@ std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState*
         return std::nullopt;
     }
 
-    uint32_t SizeNeeded = 0;
-
-    uint32_t GuestSize;
-    XXH128_hash_t GuestHash;
-    uint32_t HostSize;
-    uint32_t EntryPointCount;
-    SizeNeeded += sizeof(GuestSize) + sizeof(GuestHash) + sizeof(HostSize) + sizeof(EntryPointCount);
-    if (Entry.Size < SizeNeeded) {
+    if (Entry.Size < sizeof(DiskCacheBlobFixedHeader)) {
         return std::nullopt;
     }
-    // if we survived this, we know have enough to read the dynamic sizes, at least
-    // we can't read them directly off of HitData because they might be unaligned?
-    memcpy(&GuestSize, HitData.Blob.data(), sizeof(GuestSize));
-    memcpy(&GuestHash, HitData.Blob.data() + sizeof(GuestSize), sizeof(GuestHash));
-    memcpy(&HostSize, HitData.Blob.data() + sizeof(GuestSize) + sizeof(GuestHash), sizeof(HostSize));
-    memcpy(&EntryPointCount, HitData.Blob.data() + sizeof(GuestSize) + sizeof(GuestHash) + sizeof(HostSize), sizeof(EntryPointCount));
+    DiskCacheBlobFixedHeader Header;
+    memcpy(&Header, HitData.Blob.data(), sizeof(Header));
 
     // do we have enough room in our live code to even hash GuestSize worth?
     auto RangeInfo = CTX->SyscallHandler->QueryGuestExecutableRange(Thread, GuestRIP);
@@ -327,33 +318,128 @@ std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState*
         return std::nullopt;
     }
     uint64_t Available = RangeInfo.Base + RangeInfo.Size - GuestRIP;
-    if (Available < GuestSize) {
+    if (Available < Header.GuestSize) {
         return std::nullopt;
     }
 
-    XXH128_hash_t LiveGuestHash = XXH3_128bits(reinterpret_cast<void *>(GuestRIP), GuestSize);
-    if (std::memcmp(&LiveGuestHash, &GuestHash, sizeof(GuestHash)) != 0) {
-        LogMan::Msg::IFmt("hash mismatch! length {:d}", GuestSize);
+    XXH128_hash_t LiveGuestHash = XXH3_128bits(reinterpret_cast<void *>(GuestRIP), Header.GuestSize);
+    if (std::memcmp(&LiveGuestHash, &Header.GuestHash, sizeof(Header.GuestHash)) != 0) {
+        //LogMan::Msg::IFmt("hash mismatch! length {:d}", Header.GuestSize);
         return std::nullopt;
     }
-    LogMan::Msg::IFmt("hash ok! length {:d}", GuestSize);
+    //LogMan::Msg::IFmt("hash ok! length {:d}", Header.GuestSize);
 
-    HitData.HostCode = {HitData.Blob.data() + SizeNeeded, HostSize};
-    HitData.EntryPoints = {reinterpret_cast<const DiskCacheBlobEntryPoint*>(HitData.Blob.data() + SizeNeeded + HostSize), EntryPointCount};
-
-    // this seems to be a full hit, lastly, check the entry is big enough to have cached host code and other vital metadata
-    SizeNeeded += HostSize + EntryPointCount * sizeof(DiskCacheBlobEntryPoint);
+    // this seems to be a full hit, lastly, check the entry is big enough to have everything (except maybe GuestCode)
+    uint32_t SizeNeeded = sizeof(Header) + Header.HostSize + Header.EntryPointCount * sizeof(DiskCacheBlobEntryPoint);
+    SizeNeeded += Header.SmallRelocCount * sizeof(DiskCacheBlobSmallRelocation) + Header.ThunkRelocCount * sizeof(DiskCacheBlobThunkRelocation);
     if (Entry.Size < SizeNeeded) {
         return std::nullopt;
+    }
+
+    HitData.HostCode = {HitData.Blob.data() + sizeof(Header), Header.HostSize};
+    HitData.EntryPoints = {reinterpret_cast<const DiskCacheBlobEntryPoint*>(HitData.Blob.data() + sizeof(Header) + Header.HostSize), Header.EntryPointCount};
+
+    auto* SmallRelocs = reinterpret_cast<const DiskCacheBlobSmallRelocation*>(HitData.Blob.data() + sizeof(Header) + Header.HostSize + Header.EntryPointCount * sizeof(DiskCacheBlobEntryPoint));
+    auto* ThunkRelocs = reinterpret_cast<const DiskCacheBlobThunkRelocation*>(reinterpret_cast<const uint8_t*>(SmallRelocs) + Header.SmallRelocCount * sizeof(DiskCacheBlobSmallRelocation));
+
+    HitData.Relocations.reserve(Header.SmallRelocCount + Header.ThunkRelocCount);
+    for (uint32_t i = 0; i < Header.SmallRelocCount; ++i) {
+        const auto& SmallReloc = SmallRelocs[i];
+        FEXCore::CPU::Relocation Reloc = FEXCore::CPU::Relocation::Default();
+        Reloc.Header.Type = (CPU::RelocationTypes)SmallReloc.Type;
+        Reloc.Header.Offset = SmallReloc.Offset;
+        switch (SmallReloc.Type) {
+        case uint8_t(CPU::RelocationTypes::RELOC_NAMED_SYMBOL_LITERAL):
+            Reloc.NamedSymbolLiteral.Symbol = CPU::RelocNamedSymbolLiteral::NamedSymbol(SmallReloc.Named.Symbol);
+            break;
+        case uint8_t(CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL):
+            Reloc.GuestRIP.GuestRIP = SmallReloc.RIPLiteral.GuestRIP;
+            break;
+        case uint8_t(CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE):
+            Reloc.GuestRIP.RegisterIndex = SmallReloc.RIPMove.RegisterIndex;
+            Reloc.GuestRIP.GuestRIP = SmallReloc.RIPMove.GuestRIP;
+            break;
+        default:
+            return std::nullopt;
+        }
+        HitData.Relocations.push_back(Reloc);
+    }
+    for (uint32_t i = 0; i < Header.ThunkRelocCount; ++i) {
+        const auto& BigReloc = ThunkRelocs[i];
+        FEXCore::CPU::Relocation Reloc = FEXCore::CPU::Relocation::Default();
+        Reloc.NamedThunkMove.Header.Offset = BigReloc.Offset;
+        Reloc.NamedThunkMove.Header.Type = CPU::RelocationTypes::RELOC_NAMED_THUNK_MOVE;
+        Reloc.NamedThunkMove.RegisterIndex = BigReloc.RegisterIndex;
+        memcpy(&Reloc.NamedThunkMove.Symbol, BigReloc.SymbolHash, sizeof(BigReloc.SymbolHash));
+        HitData.Relocations.push_back(Reloc);
     }
 
     return HitData;
 }
 
 bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP, std::span<const uint8_t> GuestCode,
-                      std::span<const uint8_t> HostCode, std::span<const DiskCacheBlobEntryPoint> EntryPoints) {
-    if (!RWCacheDB) {
+                      const CPU::CPUBackend::CompiledCode& CompiledCode, std::span<const FEXCore::CPU::Relocation> Relocations) {
+    if (!IsWritingDiskCache()) {
         return false;
+    }
+
+    // pack entrypoints to disk format
+    fextl::vector<DiskCacheBlobEntryPoint> CacheEntryPoints;
+    CacheEntryPoints.reserve(CompiledCode.EntryPoints.size());
+
+    for (auto [GuestAddr, HostAddr] : CompiledCode.EntryPoints) {
+        CacheEntryPoints.push_back({GuestAddr - Region.FileStartVA, uint32_t(HostAddr - CompiledCode.BlockBegin)});
+    }
+
+    // pack relocations to disk format
+    fextl::vector<DiskCacheBlobSmallRelocation> SmallRelocs;
+    fextl::vector<DiskCacheBlobThunkRelocation> ThunkRelocs;
+
+    for (const auto& Reloc : Relocations) {
+        // relocs aren't cleared every time if IsGeneratingCache, so filter just in case
+        if (Reloc.Header.Offset < CompiledCode.HostCodeOffset || Reloc.Header.Offset >= CompiledCode.HostCodeOffset + CompiledCode.Size) {
+            continue;
+        }
+        // re-relocate :harold:
+        uint32_t LocalOffset = uint32_t(Reloc.Header.Offset - CompiledCode.HostCodeOffset);
+
+        switch (Reloc.Header.Type) {
+            // it's important to zero-init the element completely so we don't have garbage in unused fields
+            // this way, the caches stay deterministic across machines
+            case CPU::RelocationTypes::RELOC_NAMED_SYMBOL_LITERAL: {
+                DiskCacheBlobSmallRelocation SmallReloc = {};
+                SmallReloc.Offset = LocalOffset;
+                SmallReloc.Type = uint8_t(Reloc.Header.Type);
+                SmallReloc.Named.Symbol = uint32_t(Reloc.NamedSymbolLiteral.Symbol);
+                SmallRelocs.push_back(SmallReloc);
+                break;
+            }
+            case CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL: {
+                DiskCacheBlobSmallRelocation SmallReloc = {};
+                SmallReloc.Offset = LocalOffset;
+                SmallReloc.Type = uint8_t(Reloc.Header.Type);
+                SmallReloc.RIPLiteral.GuestRIP = Reloc.GuestRIP.GuestRIP - GuestRIP;
+                SmallRelocs.push_back(SmallReloc);
+                break;
+            }
+            case CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE: {
+                DiskCacheBlobSmallRelocation SmallReloc = {};
+                SmallReloc.Offset = LocalOffset;
+                SmallReloc.Type = uint8_t(Reloc.Header.Type);
+                SmallReloc.RIPMove.RegisterIndex = Reloc.GuestRIP.RegisterIndex;
+                SmallReloc.RIPMove.GuestRIP = Reloc.GuestRIP.GuestRIP - GuestRIP;
+                SmallRelocs.push_back(SmallReloc);
+                break;
+            }
+            case CPU::RelocationTypes::RELOC_NAMED_THUNK_MOVE: {
+                DiskCacheBlobThunkRelocation BigReloc = {};
+                BigReloc.Offset = LocalOffset;
+                BigReloc.RegisterIndex = Reloc.NamedThunkMove.RegisterIndex;
+                memcpy(BigReloc.SymbolHash, &Reloc.NamedThunkMove.Symbol, sizeof(BigReloc.SymbolHash));
+                ThunkRelocs.push_back(BigReloc);
+                break;
+            }
+        }
     }
 
     uint64_t ModuleOffset = GuestRIP - Region.FileStartVA;
@@ -363,18 +449,21 @@ bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP
     foz_payload_key Key = {};
     memcpy(Key.bytes, &ModuleOffset, sizeof(ModuleOffset));
 
-    uint32_t GuestSize = (uint32_t)GuestCode.size();
-    XXH128_hash_t GuestHash = XXH3_128bits(GuestCode.data(), GuestCode.size());
-    uint32_t HostSize = (uint32_t)HostCode.size();
-    uint32_t EntryPointCount = (uint32_t)EntryPoints.size();
+    DiskCacheBlobFixedHeader Header {
+        .GuestSize = (uint32_t)GuestCode.size(),
+        .HostSize = (uint32_t)CompiledCode.Size,
+        .EntryPointCount = (uint32_t)CacheEntryPoints.size(),
+        .SmallRelocCount = (uint32_t)SmallRelocs.size(),
+        .ThunkRelocCount = (uint32_t)ThunkRelocs.size(),
+        .GuestHash = XXH3_128bits(GuestCode.data(), GuestCode.size()),
+    };
 
     std::span<const uint8_t> CacheBlobChunks[] = {
-        {(const uint8_t*)&GuestSize, sizeof(GuestSize)},
-        {(const uint8_t*)&GuestHash, sizeof(GuestHash)},
-        {(const uint8_t*)&HostSize, sizeof(HostSize)},
-        {(const uint8_t*)&EntryPointCount, sizeof(EntryPointCount)},
-        HostCode,
-        {(const uint8_t*)EntryPoints.data(), EntryPointCount * sizeof(DiskCacheBlobEntryPoint)},
+        {(const uint8_t*)&Header, sizeof(Header)},
+        {(const uint8_t*)CompiledCode.BlockBegin, CompiledCode.Size},
+        {(const uint8_t*)CacheEntryPoints.data(), CacheEntryPoints.size() * sizeof(DiskCacheBlobEntryPoint)},
+        {(const uint8_t*)SmallRelocs.data(), SmallRelocs.size() * sizeof(DiskCacheBlobSmallRelocation)},
+        {(const uint8_t*)ThunkRelocs.data(), ThunkRelocs.size() * sizeof(DiskCacheBlobThunkRelocation)},
         GuestCode,
     };
 

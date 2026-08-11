@@ -61,6 +61,8 @@ namespace CPU {
       fextl::map<uint64_t, uint8_t*> EntryPoints;
       // The total size of the codeblock from [BlockBegin, BlockBegin+Size).
       size_t Size;
+      // Offset of BlockBegin from the start of the CodeBuffer it lives in
+      uint64_t HostCodeOffset;
     };
 
     // Header that can live at the start of a JIT block.

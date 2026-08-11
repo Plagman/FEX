@@ -1105,6 +1105,7 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
       EntryPoint.second += Delta;
     }
     CodeBegin += Delta;
+    CodeData.HostCodeOffset = CodeData.BlockBegin - CurrentCodeBuffer->Ptr;
 
     for (std::size_t Idx = PrevNumAllocations; Idx != Relocations.size(); ++Idx) {
       Relocations[Idx].Header.Offset += SharedCodeBuffers.LatestOffset;
@@ -1182,6 +1183,7 @@ CPUBackend::CompiledCode Arm64JITCore::LoadCachedCode(std::span<const uint8_t> H
   CPUBackend::CompiledCode Result;
   Result.BlockBegin = Dest;
   Result.Size = HostBytes.size();
+  Result.HostCodeOffset = Dest - CurrentCodeBuffer->Ptr;
   for (const auto& Ep : EntryPoints) {
     Result.EntryPoints[Ep.GuestRIP] = Dest + Ep.HostOffset;
   }

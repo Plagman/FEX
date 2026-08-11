@@ -2,6 +2,8 @@
 #pragma once
 #include "FEXCore/Core/CodeCache.h"
 #include "FEXCore/Core/Context.h"
+#include "Interface/Core/JIT/Relocations.h"
+#include "Interface/Core/CPUBackend.h"
 #include "FEXCore/Utils/File.h"
 #include "FEXCore/fextl/memory.h"
 #include <FEXCore/fextl/string.h>
@@ -11,6 +13,7 @@
 #include <stdint.h>
 #include <optional>
 #include <span>
+#include <xxhash.h>
 
 namespace FEXCore {
 
@@ -45,15 +48,50 @@ struct CacheIndexEntry {
     uint32_t Size;
 };
 
+struct __attribute__((packed)) DiskCacheBlobFixedHeader {
+    uint32_t GuestSize;
+    uint32_t HostSize;
+    uint32_t EntryPointCount;
+    uint32_t SmallRelocCount;
+    uint32_t ThunkRelocCount;
+    XXH128_hash_t GuestHash;
+};
+
 struct __attribute__((packed)) DiskCacheBlobEntryPoint {
-    uint64_t GuestRIP;
+    uint64_t GuestRIP; // todo those have been made relative since i wrote this, can we get away with less size here?
     uint32_t HostOffset;
+};
+
+// packed struct for types 0, 2 and 3. type 1 is bigger and separate below
+struct __attribute__((packed)) DiskCacheBlobSmallRelocation {
+    uint32_t Offset;
+    uint8_t Type;
+    union {
+        struct {
+            uint32_t Symbol;
+        } Named;
+        struct {
+            uint64_t GuestRIP;
+        } RIPLiteral;
+        struct {
+            uint8_t RegisterIndex;
+            uint64_t GuestRIP;
+        } RIPMove;
+    };
+};
+
+// type 1, implicit
+struct __attribute__((packed)) DiskCacheBlobThunkRelocation {
+    uint32_t Offset;
+    uint8_t RegisterIndex;
+    uint8_t SymbolHash[32]; // sha256sum in the real RelocNamedThunkMove
 };
 
 struct DiskCacheCodeHitData {
     fextl::vector<uint8_t> Blob;
-    std::span<const uint8_t> HostCode;
+    std::span<uint8_t> HostCode;
     std::span<const DiskCacheBlobEntryPoint> EntryPoints;
+    fextl::vector<FEXCore::CPU::Relocation> Relocations;
 
     // the spans above point to memory owned by the Blob vec, so it's important this can't be copied
     DiskCacheCodeHitData() = default;
@@ -105,9 +143,17 @@ class DiskCache {
     bool OpenCacheDB(const fextl::string &CacheDBName, bool ReadOnly);
 public:
     void Init(FEXCore::Context::ContextImpl *CTX);
+
     std::optional<DiskCacheCodeHitData> Lookup(Core::InternalThreadState* Thread, const ExecutableFileSectionInfo& Region, uint64_t GuestRIP);
     bool Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP, std::span<const uint8_t> GuestCode,
-               std::span<const uint8_t> HostCode, std::span<const DiskCacheBlobEntryPoint> EntryPoints);
+               const CPU::CPUBackend::CompiledCode& CompiledCode, std::span<const FEXCore::CPU::Relocation> Relocations);
+
+    bool IsWritingDiskCache() const {
+        return (bool)RWCacheDB;
+    }
+    bool IsReadingDiskCache() const {
+        return true;
+    }
 };
 
 }

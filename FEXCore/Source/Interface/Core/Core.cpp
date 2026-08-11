@@ -862,21 +862,27 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
   }
 
   std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
+  std::optional<DiskCacheCodeHitData> Hit;
+  bool DiskCacheHitRelocationsApplied = false;
+  bool LoadDiskCacheCode = true;
   if (Region && Region->FileStartVA != 0) {
-    if (auto Hit = DiskCache.Lookup(Thread, *Region, GuestRIP)) {
-      // LogMan::Msg::IFmt("L4 hit rip=0x{:x} num_entries={}", GuestRIP, Hit->EntryPoints.size());
-      // for (const auto& E : Hit->EntryPoints) {
-      //   LogMan::Msg::IFmt("  entry: rip=0x{:x} hostoff={}", E.GuestRIP, E.HostOffset);
-      // }
-      auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode, Hit->EntryPoints);
-      if (LoadedCode.BlockBegin) {
-        fextl::vector<uint64_t> CodePages;
-        for (auto [GuestOffset, HostAddr] : LoadedCode.EntryPoints) {
-          Thread->LookupCache->AddBlockMapping(Thread, GuestOffset + Region->FileStartVA, CodePages, HostAddr);
+    Hit = DiskCache.Lookup(Thread, *Region, GuestRIP);
+    if (Hit) {
+      DiskCacheHitRelocationsApplied = CodeCache.ApplyCodeRelocations(GuestRIP, std::as_writable_bytes(Hit->HostCode), Hit->Relocations, 0, false);
+
+      if (DiskCacheHitRelocationsApplied && LoadDiskCacheCode) {
+        auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode, Hit->EntryPoints);
+        if (LoadedCode.BlockBegin) {
+
+          // todo here's where we'd use serialized affected pages
+          fextl::vector<uint64_t> CodePages;
+          for (auto [GuestOffset, HostAddr] : LoadedCode.EntryPoints) {
+            Thread->LookupCache->AddBlockMapping(Thread, GuestOffset + Region->FileStartVA, CodePages, HostAddr);
+          }
+
+          uint64_t ModuleOffset = GuestRIP - Region->FileStartVA;
+          return reinterpret_cast<uintptr_t>(LoadedCode.EntryPoints[ModuleOffset]);
         }
-        uint64_t ModuleOffset = GuestRIP - Region->FileStartVA;
-        //LogMan::Msg::IFmt("cache hit {:p}", (void*)LoadedCode.EntryPoints[ModuleOffset]);
-        return reinterpret_cast<uintptr_t>(LoadedCode.EntryPoints[ModuleOffset]);
       }
     }
   }
@@ -935,11 +941,6 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
     }
   }
 
-  // Clear any relocations that might have been generated
-  if (!CodeCache.IsGeneratingCache) {
-    Thread->CPUBackend->ClearRelocations();
-  }
-
   fextl::vector<uint64_t> CodePages;
 
   if (NeedsAddGuestCodeRanges) {
@@ -955,24 +956,29 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
     }
   }
 
-  fextl::vector<FEXCore::DiskCacheBlobEntryPoint> CacheEntryPoints;
-  CacheEntryPoints.reserve(CompiledCode.EntryPoints.size());
-
   // Insert to lookup cache
   for (auto [GuestAddr, HostAddr] : CompiledCode.EntryPoints) {
     Thread->LookupCache->AddBlockMapping(Thread, GuestAddr, CodePages, HostAddr);
-    CacheEntryPoints.push_back({GuestAddr - Region->FileStartVA, uint32_t(HostAddr - CompiledCode.BlockBegin)});
   }
 
   // Disk Cache
   if (Region && Region->FileStartVA != 0) {
+    std::span<const FEXCore::CPU::Relocation> Relocations;
+    if (DebugData && DebugData->Relocations) {
+      Relocations = *DebugData->Relocations;
+    }
+    std::span<const uint8_t> GuestCode = {reinterpret_cast<const uint8_t*>(StartAddr), Length};
     // todo i guess we also need to serialize codepages above for smc detection
-    DiskCache.Store(*Region, GuestRIP, std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(StartAddr), Length},
-                    std::span<const uint8_t>{CompiledCode.BlockBegin, CompiledCode.Size}, CacheEntryPoints);
+    DiskCache.Store(*Region, GuestRIP, GuestCode, CompiledCode, Relocations);
 
     if (CodeMapWriter) {
         CodeMapWriter->AppendBlock(*Region, GuestRIP);
     }
+  }
+
+  // Clear any relocations that might have been generated
+  if (!CodeCache.IsGeneratingCache) {
+    Thread->CPUBackend->ClearRelocations();
   }
 
   return (uintptr_t)CodePtr;
