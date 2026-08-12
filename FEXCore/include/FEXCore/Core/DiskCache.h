@@ -70,13 +70,13 @@ struct __attribute__((packed)) DiskCacheBlobSmallRelocation {
     uint32_t Offset;
     uint8_t Type;
     union {
-        struct {
+        struct __attribute__((packed)) {
             uint32_t Symbol;
         } Named;
-        struct {
+        struct __attribute__((packed)) {
             uint64_t GuestRIP;
         } RIPLiteral;
-        struct {
+        struct __attribute__((packed)) {
             uint8_t RegisterIndex;
             uint64_t GuestRIP;
         } RIPMove;
