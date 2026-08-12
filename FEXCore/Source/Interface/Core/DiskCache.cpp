@@ -332,7 +332,7 @@ std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState*
 
     // this seems to be a full hit, lastly, check the entry is big enough to have everything (except maybe GuestCode)
     uint32_t SizeNeeded = sizeof(Header) + Header.HostSize + Header.EntryPointCount * sizeof(DiskCacheBlobEntryPoint);
-    SizeNeeded += Header.SmallRelocCount * sizeof(DiskCacheBlobSmallRelocation) + Header.ThunkRelocCount * sizeof(DiskCacheBlobThunkRelocation);
+    SizeNeeded += Header.SmallRelocCount * sizeof(DiskCacheBlobSmallRelocation) + Header.ThunkRelocCount * sizeof(DiskCacheBlobThunkRelocation) + Header.TouchedGuestPagesCount * sizeof(int64_t);
     if (Entry.Size < SizeNeeded) {
         return std::nullopt;
     }
@@ -375,11 +375,18 @@ std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState*
         HitData.Relocations.push_back(Reloc);
     }
 
+    auto *PageOffsets = reinterpret_cast<const int64_t*>(reinterpret_cast<const uint8_t*>(ThunkRelocs) + Header.ThunkRelocCount * sizeof(DiskCacheBlobThunkRelocation));
+    HitData.GuestPages.reserve(Header.TouchedGuestPagesCount);
+    for (uint32_t i = 0; i < Header.TouchedGuestPagesCount; ++i) {
+        HitData.GuestPages.push_back(GuestRIP + PageOffsets[i]);
+    }
+
     return HitData;
 }
 
 bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP, std::span<const uint8_t> GuestCode,
-                      const CPU::CPUBackend::CompiledCode& CompiledCode, std::span<const FEXCore::CPU::Relocation> Relocations) {
+                      const CPU::CPUBackend::CompiledCode& CompiledCode, std::span<const FEXCore::CPU::Relocation> Relocations,
+                      const Frontend::Decoder::DecodedBlockInformation* DecodedBlockInfo) {
     if (!IsWritingDiskCache()) {
         return false;
     }
@@ -396,6 +403,8 @@ bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP
     // pack relocations to disk format
     fextl::vector<DiskCacheBlobSmallRelocation> SmallRelocs;
     fextl::vector<DiskCacheBlobThunkRelocation> ThunkRelocs;
+
+    // todo discover sizes first and reserve vecs?
 
     for (const auto& Reloc : Relocations) {
         // relocs aren't cleared every time if IsGeneratingCache, so filter just in case
@@ -444,6 +453,16 @@ bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP
         }
     }
 
+    // pack touched pages, relative to GuestRIP
+    // in theory we could save some size here, unlikely we need all 64bits
+    fextl::vector<int64_t> GuestPageOffsets;
+    if (DecodedBlockInfo) {
+        GuestPageOffsets.reserve(DecodedBlockInfo->CodePages.size());
+        for (auto &GuestPage : DecodedBlockInfo->CodePages) {
+            GuestPageOffsets.push_back(GuestPage - GuestRIP);
+        }
+    }
+
     uint64_t ModuleOffset = GuestRIP - Region.FileStartVA;
 
     // todo also copy/hash options that affect codegen into the key
@@ -457,6 +476,7 @@ bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP
         .EntryPointCount = (uint32_t)CacheEntryPoints.size(),
         .SmallRelocCount = (uint32_t)SmallRelocs.size(),
         .ThunkRelocCount = (uint32_t)ThunkRelocs.size(),
+        .TouchedGuestPagesCount = (uint32_t)GuestPageOffsets.size(),
         .GuestHash = XXH3_128bits(GuestCode.data(), GuestCode.size()),
     };
 
@@ -466,6 +486,7 @@ bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP
         {(const uint8_t*)CacheEntryPoints.data(), CacheEntryPoints.size() * sizeof(DiskCacheBlobEntryPoint)},
         {(const uint8_t*)SmallRelocs.data(), SmallRelocs.size() * sizeof(DiskCacheBlobSmallRelocation)},
         {(const uint8_t*)ThunkRelocs.data(), ThunkRelocs.size() * sizeof(DiskCacheBlobThunkRelocation)},
+        {(const uint8_t*)GuestPageOffsets.data(), GuestPageOffsets.size() * sizeof(int64_t)},
         GuestCode,
     };
 

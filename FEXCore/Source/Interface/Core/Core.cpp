@@ -874,10 +874,18 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
         auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode, Hit->EntryPoints);
         if (LoadedCode.BlockBegin) {
 
-          // todo here's where we'd use serialized affected pages
-          fextl::vector<uint64_t> CodePages;
+          // annoying to unpack a different copy here, maybe better way to do this
+          fextl::set<uint64_t> EntryPoints;
           for (auto [GuestOffset, HostAddr] : LoadedCode.EntryPoints) {
-            Thread->LookupCache->AddBlockMapping(Thread, GuestOffset + Region->FileStartVA, CodePages, HostAddr);
+            EntryPoints.insert(GuestOffset + Region->FileStartVA);
+          }
+          for (auto CodePage : Hit->GuestPages) {
+            if (Thread->LookupCache->AddBlockExecutableRange(Thread, EntryPoints, CodePage, FEXCore::Utils::FEX_PAGE_SIZE)) {
+              SyscallHandler->MarkGuestExecutableRange(Thread, CodePage, FEXCore::Utils::FEX_PAGE_SIZE);
+            }
+          }
+          for (auto [GuestOffset, HostAddr] : LoadedCode.EntryPoints) {
+            Thread->LookupCache->AddBlockMapping(Thread, GuestOffset + Region->FileStartVA, Hit->GuestPages, HostAddr);
           }
 
           uint64_t ModuleOffset = GuestRIP - Region->FileStartVA;
@@ -968,8 +976,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
       Relocations = *DebugData->Relocations;
     }
     std::span<const uint8_t> GuestCode = {reinterpret_cast<const uint8_t*>(StartAddr), Length};
+    const Frontend::Decoder::DecodedBlockInformation* BlockInfo = NeedsAddGuestCodeRanges ? Thread->FrontendDecoder->GetDecodedBlockInfo() : nullptr;
     // todo i guess we also need to serialize codepages above for smc detection
-    DiskCache.Store(*Region, GuestRIP, GuestCode, CompiledCode, Relocations);
+    DiskCache.Store(*Region, GuestRIP, GuestCode, CompiledCode, Relocations, BlockInfo);
 
     if (CodeMapWriter) {
         CodeMapWriter->AppendBlock(*Region, GuestRIP);

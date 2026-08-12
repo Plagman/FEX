@@ -3,6 +3,7 @@
 #include "FEXCore/Core/CodeCache.h"
 #include "FEXCore/Core/Context.h"
 #include "Interface/Core/JIT/Relocations.h"
+#include "Interface/Core/Frontend.h"
 #include "Interface/Core/CPUBackend.h"
 #include "FEXCore/Utils/File.h"
 #include "FEXCore/fextl/memory.h"
@@ -55,6 +56,7 @@ struct __attribute__((packed)) DiskCacheBlobFixedHeader {
     uint32_t EntryPointCount;
     uint32_t SmallRelocCount;
     uint32_t ThunkRelocCount;
+    uint32_t TouchedGuestPagesCount;
     XXH128_hash_t GuestHash;
 };
 
@@ -93,6 +95,7 @@ struct DiskCacheCodeHitData {
     std::span<uint8_t> HostCode;
     std::span<const DiskCacheBlobEntryPoint> EntryPoints;
     fextl::vector<FEXCore::CPU::Relocation> Relocations;
+    fextl::vector<uint64_t> GuestPages;
 
     // the spans above point to memory owned by the Blob vec, so it's important this can't be copied
     DiskCacheCodeHitData() = default;
@@ -148,7 +151,8 @@ public:
 
     std::optional<DiskCacheCodeHitData> Lookup(Core::InternalThreadState* Thread, const ExecutableFileSectionInfo& Region, uint64_t GuestRIP);
     bool Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP, std::span<const uint8_t> GuestCode,
-               const CPU::CPUBackend::CompiledCode& CompiledCode, std::span<const FEXCore::CPU::Relocation> Relocations);
+               const CPU::CPUBackend::CompiledCode& CompiledCode, std::span<const FEXCore::CPU::Relocation> Relocations,
+               const Frontend::Decoder::DecodedBlockInformation* DecodedBlockInfo);
 
     bool IsWritingDiskCache() const {
         return (bool)RWCacheDB;
