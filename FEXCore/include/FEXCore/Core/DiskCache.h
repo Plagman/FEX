@@ -114,10 +114,20 @@ class DiskCacheFOZFile {
     fextl::string FileName;
     fextl::unique_ptr<File::File> FD;
     bool ReadOnly = false;
-    bool ReadyForAppend = false;
-    uint64_t AppendCursor = 0;
 public:
     bool Open(const fextl::string &CacheFileName, bool ReadOnly);
+    bool Lock() {
+        if (!FD) {
+            return false;
+        }
+        return FD->Lock();
+    }
+    bool Unlock() {
+        if (!FD) {
+            return false;
+        }
+        return FD->Unlock();
+    }
     bool ReadNextBlob(foz_payload_key &OutKey, foz_payload_header &OutHeader, fextl::vector<uint8_t> &OutBlob);
     bool ReadBlob(uint64_t Offset, std::span<uint8_t> OutBlob);
     bool WriteBlob(const foz_payload_key &Key, std::span<const std::span<const uint8_t>> BlobChunks, uint64_t &OutBlobOffset);

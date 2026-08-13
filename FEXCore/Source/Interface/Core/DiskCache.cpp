@@ -69,8 +69,6 @@ bool DiskCacheFOZFile::CreateNew() {
         return false;
     }
 
-    // could readyforappend here and infer cursor position but whatever
-
     return true;
 }
 
@@ -108,8 +106,6 @@ bool DiskCacheFOZFile::ReadNextBlob(foz_payload_key &OutKey, foz_payload_header 
 }
 
 bool DiskCacheFOZFile::ReadBlob(uint64_t Offset, std::span<uint8_t> OutBlob) {
-    ReadyForAppend = false;
-
     ssize_t SeekRet = FD->Seek(Offset, File::SeekOp::BEGIN);
     if (SeekRet < 0) {
         return false;
@@ -122,19 +118,17 @@ bool DiskCacheFOZFile::ReadBlob(uint64_t Offset, std::span<uint8_t> OutBlob) {
 }
 
 bool DiskCacheFOZFile::WriteBlob(const foz_payload_key &Key, std::span<const std::span<const uint8_t>> BlobChunks, uint64_t &OutBlobOffset) {
-    if (!ReadyForAppend) {
-        ssize_t SeekRet = FD->Seek(0, File::SeekOp::END);
-        if (SeekRet < 0) {
-            return false;
-        }
-        ReadyForAppend = true;
-        AppendCursor = (uint64_t)SeekRet;
+    uint64_t WriteOffset = 0;
+    ssize_t SeekRet = FD->Seek(0, File::SeekOp::END);
+    if (SeekRet < 0) {
+        return false;
     }
+    WriteOffset = (uint64_t)SeekRet;
 
     if (FD->Write(Key.bytes, sizeof(Key.bytes)) != sizeof(Key.bytes)) {
         return false;
     }
-    AppendCursor += sizeof(Key.bytes);
+    WriteOffset += sizeof(Key.bytes);
 
     uint64_t TotalBlobSize = 0;
     for (const std::span<const uint8_t> &Chunk : BlobChunks) {
@@ -151,9 +145,9 @@ bool DiskCacheFOZFile::WriteBlob(const foz_payload_key &Key, std::span<const std
     if (FD->Write(&ScratchHeader, sizeof(ScratchHeader)) != sizeof(ScratchHeader)) {
         return false;
     }
-    AppendCursor += sizeof(ScratchHeader);
+    WriteOffset += sizeof(ScratchHeader);
 
-    OutBlobOffset = AppendCursor;
+    OutBlobOffset = WriteOffset;
 
     for (const std::span<const uint8_t> &Chunk : BlobChunks) {
         if (Chunk.size() == 0) {
@@ -162,7 +156,6 @@ bool DiskCacheFOZFile::WriteBlob(const foz_payload_key &Key, std::span<const std
         if (FD->Write(Chunk.data(), Chunk.size()) != (ssize_t)Chunk.size()) {
             return false;
         }
-        AppendCursor += Chunk.size();
     }
 
     return true;
@@ -213,9 +206,17 @@ bool DiskCacheIndexedDB::StoreCacheBlob(const foz_payload_key &Key, std::span<co
         return true;
     }
 
+    if (!CacheFOZ.Lock() || !IndexFOZ.Lock()) {
+        CacheFOZ.Unlock();
+        IndexFOZ.Unlock();
+        return false;
+    }
+
     // write cache side first so we get offset for index
     uint64_t BlobOffset = 0;
     if (!CacheFOZ.WriteBlob(Key, BlobChunks, BlobOffset)) {
+        CacheFOZ.Unlock();
+        IndexFOZ.Unlock();
         return false;
     }
 
@@ -236,8 +237,13 @@ bool DiskCacheIndexedDB::StoreCacheBlob(const foz_payload_key &Key, std::span<co
     };
     uint64_t UnusedIndexBlobOffset = 0;
     if (!IndexFOZ.WriteBlob(Key, IndexBlobChunks, UnusedIndexBlobOffset)) {
+        CacheFOZ.Unlock();
+        IndexFOZ.Unlock();
         return false;
     }
+
+    CacheFOZ.Unlock();
+    IndexFOZ.Unlock();
 
     CacheIndex[Hash] = {this, BlobOffset, (uint32_t)TotalBlobSize};
     return true;

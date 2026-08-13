@@ -7,6 +7,7 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/file.h>
 #else
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -110,6 +111,36 @@ public:
 #endif
   }
 
+  bool Lock() {
+    if (Locked) {
+      return true;
+    }
+#ifndef _WIN32
+    if (flock(Handle, LOCK_EX) == -1) {
+      return false;
+    }
+#else
+    // todo some windows shit right here
+#endif
+    Locked = true;
+    return true;
+  }
+
+  bool Unlock() {
+    if (!Locked) {
+      return false; // we could return true here :thonk:
+    }
+#ifndef _WIN32
+    if (flock(Handle, LOCK_UN) == -1) {
+      return false;
+    }
+#else
+    // todo some windows shit right here
+#endif
+    Locked = false;
+    return true;
+  }
+
   ~File() {
     if (!IsValidHandle) {
       return;
@@ -200,6 +231,7 @@ private:
   bool IsValidHandle {};
 
   FileHandleType Handle {};
+  bool Locked = false;
 #ifndef _WIN32
   static constexpr int DEFAULT_USER_PERMS = S_IRWXU | S_IRWXG | S_IRWXO;
 
