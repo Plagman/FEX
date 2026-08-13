@@ -964,11 +964,6 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
     }
   }
 
-  // Insert to lookup cache
-  for (auto [GuestAddr, HostAddr] : CompiledCode.EntryPoints) {
-    Thread->LookupCache->AddBlockMapping(Thread, GuestAddr, CodePages, HostAddr);
-  }
-
   // Disk Cache
   if (Region && Region->FileStartVA != 0) {
     std::span<const FEXCore::CPU::Relocation> Relocations;
@@ -977,12 +972,16 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
     }
     std::span<const uint8_t> GuestCode = {reinterpret_cast<const uint8_t*>(StartAddr), Length};
     const Frontend::Decoder::DecodedBlockInformation* BlockInfo = NeedsAddGuestCodeRanges ? Thread->FrontendDecoder->GetDecodedBlockInfo() : nullptr;
-    // todo i guess we also need to serialize codepages above for smc detection
     DiskCache.Store(Thread, *Region, GuestRIP, GuestCode, CompiledCode, Relocations, BlockInfo);
 
     if (CodeMapWriter) {
         CodeMapWriter->AppendBlock(*Region, GuestRIP);
     }
+  }
+
+  // Insert to lookup cache
+  for (auto [GuestAddr, HostAddr] : CompiledCode.EntryPoints) {
+    Thread->LookupCache->AddBlockMapping(Thread, GuestAddr, CodePages, HostAddr);
   }
 
   // Clear any relocations that might have been generated
