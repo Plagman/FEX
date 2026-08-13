@@ -978,7 +978,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
     std::span<const uint8_t> GuestCode = {reinterpret_cast<const uint8_t*>(StartAddr), Length};
     const Frontend::Decoder::DecodedBlockInformation* BlockInfo = NeedsAddGuestCodeRanges ? Thread->FrontendDecoder->GetDecodedBlockInfo() : nullptr;
     // todo i guess we also need to serialize codepages above for smc detection
-    DiskCache.Store(*Region, GuestRIP, GuestCode, CompiledCode, Relocations, BlockInfo);
+    DiskCache.Store(Thread, *Region, GuestRIP, GuestCode, CompiledCode, Relocations, BlockInfo);
 
     if (CodeMapWriter) {
         CodeMapWriter->AppendBlock(*Region, GuestRIP);

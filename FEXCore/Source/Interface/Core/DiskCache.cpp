@@ -384,13 +384,35 @@ std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState*
     return HitData;
 }
 
-bool DiskCache::Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP, std::span<const uint8_t> GuestCode,
-                      const CPU::CPUBackend::CompiledCode& CompiledCode, std::span<const FEXCore::CPU::Relocation> Relocations,
-                      const Frontend::Decoder::DecodedBlockInformation* DecodedBlockInfo) {
+bool DiskCache::Store(Core::InternalThreadState* Thread, const ExecutableFileSectionInfo& Region, uint64_t GuestRIP,
+                      std::span<const uint8_t> GuestCode, const CPU::CPUBackend::CompiledCode& CompiledCode,
+                      std::span<const FEXCore::CPU::Relocation> Relocations, const Frontend::Decoder::DecodedBlockInformation* DecodedBlockInfo) {
     if (!IsWritingDiskCache()) {
         return false;
     }
     std::lock_guard Guard(Lock);
+
+    // check for any reloc targets outside of our jurisdiction
+    // todo what are they exactly?
+    for (const auto& Reloc : Relocations) {
+        if (Reloc.Header.Offset < CompiledCode.HostCodeOffset ||
+            Reloc.Header.Offset >= CompiledCode.HostCodeOffset + CompiledCode.Size) {
+            continue;
+        }
+        if (Reloc.Header.Type != CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL &&
+            Reloc.Header.Type != CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE) {
+            continue;
+        }
+        uint64_t Target = Reloc.GuestRIP.GuestRIP;
+        if (Target >= Region.BeginVA && Target < Region.EndVA) {
+            continue;
+        }
+        auto TargetSection = CTX->SyscallHandler->LookupExecutableFileSection(Thread, Target);
+        if (!TargetSection || TargetSection->FileInfo.FileId != Region.FileInfo.FileId) {
+            // we don't know where it's pointing, so we don't know how to encode the offset, so we can't cache atm
+            return false;
+        }
+    }
 
     // pack entrypoints to disk format
     fextl::vector<DiskCacheBlobEntryPoint> CacheEntryPoints;

@@ -150,9 +150,9 @@ public:
     void Init(FEXCore::Context::ContextImpl *CTX);
 
     std::optional<DiskCacheCodeHitData> Lookup(Core::InternalThreadState* Thread, const ExecutableFileSectionInfo& Region, uint64_t GuestRIP);
-    bool Store(const ExecutableFileSectionInfo& Region, uint64_t GuestRIP, std::span<const uint8_t> GuestCode,
-               const CPU::CPUBackend::CompiledCode& CompiledCode, std::span<const FEXCore::CPU::Relocation> Relocations,
-               const Frontend::Decoder::DecodedBlockInformation* DecodedBlockInfo);
+    bool Store(Core::InternalThreadState* Thread, const ExecutableFileSectionInfo& Region, uint64_t GuestRIP,
+               std::span<const uint8_t> GuestCode, const CPU::CPUBackend::CompiledCode& CompiledCode,
+               std::span<const FEXCore::CPU::Relocation> Relocations, const Frontend::Decoder::DecodedBlockInformation* DecodedBlockInfo);
 
     bool IsWritingDiskCache() const {
         return (bool)RWCacheDB;
