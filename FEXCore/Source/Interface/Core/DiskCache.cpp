@@ -15,6 +15,8 @@ namespace FEXCore {
 #define FOZ_REF_MAGIC_SIZE 16
 
 constexpr uint32_t FOZ_LOCK_TIMEOUT_MS = 100;
+// give up after 2ms of trying to store - when we have an async thread we can increase this
+constexpr uint32_t FOZ_STORE_LOCK_TIMEOUT_MS = 2;
 
 static const uint8_t stream_reference_magic_and_version[FOZ_REF_MAGIC_SIZE] = {
    0x81, 'F', 'O', 'S',
@@ -44,13 +46,20 @@ bool DiskCacheFOZFile::Open(const fextl::string &FOZFileName, bool ReadOnly) {
         return false;
     }
 
-    if (!ReadOnly && !FD->Lock(FOZ_LOCK_TIMEOUT_MS)) {
-        FD.reset();
-        return false;
+    bool Valid = false;
+    bool TookLock = false;
+    ssize_t Size = FD->Seek(0, File::SeekOp::END);
+
+    if (Size < FOZ_REF_MAGIC_SIZE && !ReadOnly) {
+        if (!FD->Lock(FOZ_LOCK_TIMEOUT_MS)) {
+            FD.reset();
+            return false;
+        }
+        TookLock = true;
+        // seek in case someone else made it while we waited above
+        Size = FD->Seek(0, File::SeekOp::END);
     }
 
-    bool Valid = false;
-    ssize_t Size = FD->Seek(0, File::SeekOp::END);
     if (Size == 0 && !ReadOnly) {
         Valid = FD->Write(stream_reference_magic_and_version, FOZ_REF_MAGIC_SIZE) == FOZ_REF_MAGIC_SIZE;
     } else {
@@ -63,7 +72,7 @@ bool DiskCacheFOZFile::Open(const fextl::string &FOZFileName, bool ReadOnly) {
         }
     }
 
-    if (!ReadOnly) {
+    if (TookLock) {
         FD->Unlock();
     }
 
@@ -188,7 +197,7 @@ bool DiskCacheIndexedDB::StoreCacheBlob(const foz_payload_key &Key, std::span<co
         return true;
     }
 
-    if (!CacheFOZ.Lock(FOZ_LOCK_TIMEOUT_MS) || !IndexFOZ.Lock(FOZ_LOCK_TIMEOUT_MS)) {
+    if (!CacheFOZ.Lock(FOZ_STORE_LOCK_TIMEOUT_MS) || !IndexFOZ.Lock(FOZ_STORE_LOCK_TIMEOUT_MS)) {
         CacheFOZ.Unlock();
         IndexFOZ.Unlock();
         return false;
