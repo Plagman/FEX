@@ -1168,10 +1168,11 @@ CPUBackend::CompiledCode Arm64JITCore::LoadCachedCode(std::span<const uint8_t> H
   SetCursorOffset(SharedCodeBuffers.LatestOffset);
   Align16B();
 
-  // todo we should ask for more size here instead of failing out and forcing a fallback to normal compile
   if (GetCursorOffset() + HostBytes.size() > CurrentCodeBuffer->UsableSize()) {
-    return {};
+    CTX->ClearCodeCache(ThreadState);
   }
+
+  SharedCodeBuffers.LatestOffset = GetCursorOffset();
 
   uint8_t* Dest = GetCursorAddress<uint8_t*>();
   memcpy(Dest, HostBytes.data(), HostBytes.size());
