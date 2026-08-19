@@ -5,6 +5,7 @@
 #include "Interface/Core/JIT/Relocations.h"
 #include "Interface/Core/Frontend.h"
 #include "Interface/Core/CPUBackend.h"
+#include "FEXCore/Config/Config.h"
 #include "FEXCore/Utils/File.h"
 #include "FEXCore/fextl/memory.h"
 #include <FEXCore/fextl/string.h>
@@ -149,6 +150,11 @@ namespace Context {
 }
 
 class DiskCache {
+    FEX_CONFIG_OPT(EnableDiskCache, DISKCACHE);
+    FEX_CONFIG_OPT(RelocationFilter, DISKCACHERELOCATIONFILTER);
+    FEX_CONFIG_OPT(BasePathOverride, DISKCACHEPATH);
+    FEX_CONFIG_OPT(RODBNames, DISKCACHERODBNAMES);
+
     FEXCore::Context::ContextImpl *CTX;
     fextl::vector<fextl::unique_ptr<DiskCacheIndexedDB>> ROCacheDBs;
     fextl::unique_ptr<DiskCacheIndexedDB> RWCacheDB;
@@ -168,7 +174,7 @@ public:
         return (bool)RWCacheDB;
     }
     bool IsReadingDiskCache() const {
-        return true;
+        return !ROCacheDBs.empty() || RWCacheDB != nullptr;
     }
 };
 

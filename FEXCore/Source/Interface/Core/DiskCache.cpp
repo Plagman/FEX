@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+#include "FEXHeaderUtils/Filesystem.h"
 #include "FEXCore/Core/DiskCache.h"
 #include "FEXCore/Utils/LogManager.h"
 #include "Interface/Context/Context.h"
@@ -74,6 +75,7 @@ bool DiskCacheFOZFile::CreateNew() {
 
 bool DiskCacheFOZFile::Open(const fextl::string &FOZFileName, bool ReadOnly) {
     FileName = FOZFileName;
+    this->ReadOnly = ReadOnly;
 
     if (!OpenExisting()) {
         if (ReadOnly) {
@@ -86,8 +88,6 @@ bool DiskCacheFOZFile::Open(const fextl::string &FOZFileName, bool ReadOnly) {
             }
         }
     }
-
-    this->ReadOnly = ReadOnly;
     return true;
 }
 
@@ -281,11 +281,37 @@ bool DiskCache::OpenCacheDB(const fextl::string &CacheDBName, bool ReadOnly) {
 void DiskCache::Init(FEXCore::Context::ContextImpl *CTX) {
     this->CTX = CTX;
 
-    // todo get those paths / enablement from options, etc
-    fextl::string CacheBaseName = "fex_disk_cache";
-    OpenCacheDB(CacheBaseName, false);
+    if (!EnableDiskCache) {
+        return;
+    }
 
-    // todo grab all CTX options that can change compilation here and bake somewhere
+    // todo grab all CTX options that can change compilation here + any environmental/hw things and hash into a bucket key
+
+    fextl::string BasePath = BasePathOverride();
+    if (BasePath.empty()) {
+        // todo put bucket hash in that path
+        BasePath = FEXCore::Config::GetCacheDirectory() + "DiskCache/";
+    }
+    FHU::Filesystem::CreateDirectories(BasePath);
+
+    fextl::string RWDBBasePath = BasePath + "RWCacheDB";
+    OpenCacheDB(RWDBBasePath, false);
+
+    std::string_view RONames = RODBNames();
+    while (!RONames.empty()) {
+        const auto Delim = RONames.find(',');
+        const std::string_view ROName = RONames.substr(0, Delim);
+        if (!ROName.empty()) {
+            fextl::string RODBBasePath = BasePath;
+            RODBBasePath += ROName;
+            OpenCacheDB(RODBBasePath, true);
+        }
+        if (Delim == std::string_view::npos) {
+            break;
+        }
+        // advance to next
+        RONames.remove_prefix(Delim + 1);
+    }
 }
 
 std::optional<DiskCacheCodeHitData> DiskCache::Lookup(Core::InternalThreadState* Thread, const ExecutableFileSectionInfo& Region, uint64_t GuestRIP) {
@@ -399,24 +425,26 @@ bool DiskCache::Store(Core::InternalThreadState* Thread, const ExecutableFileSec
     std::lock_guard Guard(Lock);
 
     // check for any reloc targets outside of our jurisdiction
-    // todo what are they exactly?
-    for (const auto& Reloc : Relocations) {
-        if (Reloc.Header.Offset < CompiledCode.HostCodeOffset ||
-            Reloc.Header.Offset >= CompiledCode.HostCodeOffset + CompiledCode.Size) {
-            continue;
-        }
-        if (Reloc.Header.Type != CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL &&
-            Reloc.Header.Type != CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE) {
-            continue;
-        }
-        uint64_t Target = Reloc.GuestRIP.GuestRIP;
-        if (Target >= Region.BeginVA && Target < Region.EndVA) {
-            continue;
-        }
-        auto TargetSection = CTX->SyscallHandler->LookupExecutableFileSection(Thread, Target);
-        if (!TargetSection || TargetSection->FileInfo.FileId != Region.FileInfo.FileId) {
-            // we don't know where it's pointing, so we don't know how to encode the offset, so we can't cache atm
-            return false;
+    // todo what are they exactly? caching those blocks is great when it works, so need to figure this out and make finer-grained if we can
+    if (RelocationFilter) {
+        for (const auto& Reloc : Relocations) {
+            if (Reloc.Header.Offset < CompiledCode.HostCodeOffset ||
+                Reloc.Header.Offset >= CompiledCode.HostCodeOffset + CompiledCode.Size) {
+                continue;
+            }
+            if (Reloc.Header.Type != CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL &&
+                Reloc.Header.Type != CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE) {
+                continue;
+            }
+            uint64_t Target = Reloc.GuestRIP.GuestRIP;
+            if (Target >= Region.BeginVA && Target < Region.EndVA) {
+                continue;
+            }
+            auto TargetSection = CTX->SyscallHandler->LookupExecutableFileSection(Thread, Target);
+            if (!TargetSection || TargetSection->FileInfo.FileId != Region.FileInfo.FileId) {
+                // we don't know where it's pointing, so we don't know how to encode the offset, so we can't cache atm
+                return false;
+            }
         }
     }
 
