@@ -109,19 +109,16 @@ struct DiskCacheCodeHitData {
 using DiskCacheIndex = fextl::robin_map<uint64_t, CacheIndexEntry>;
 
 class DiskCacheFOZFile {
-    bool OpenExisting();
-    bool CreateNew();
-
     fextl::string FileName;
     fextl::unique_ptr<File::File> FD;
     bool ReadOnly = false;
 public:
     bool Open(const fextl::string &CacheFileName, bool ReadOnly);
-    bool Lock() {
+    bool Lock(uint32_t TimeoutMS) {
         if (!FD) {
             return false;
         }
-        return FD->Lock();
+        return FD->Lock(TimeoutMS);
     }
     bool Unlock() {
         if (!FD) {

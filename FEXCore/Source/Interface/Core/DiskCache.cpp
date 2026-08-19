@@ -14,6 +14,8 @@ namespace FEXCore {
 
 #define FOZ_REF_MAGIC_SIZE 16
 
+constexpr uint32_t FOZ_LOCK_TIMEOUT_MS = 100;
+
 static const uint8_t stream_reference_magic_and_version[FOZ_REF_MAGIC_SIZE] = {
    0x81, 'F', 'O', 'S',
    'S', 'I', 'L', 'I',
@@ -28,67 +30,47 @@ struct __attribute__((packed)) mesa_index_db_file_entry {
     uint64_t cache_db_file_offset;
 };
 
-bool DiskCacheFOZFile::OpenExisting() {
-    File::FileModes Modes = File::FileModes::READ;
-    if (!ReadOnly) {
-        Modes = Modes | File::FileModes::WRITE;
-    }
-    FD = fextl::make_unique<File::File>(FileName.c_str(), Modes);
-
-    if (!FD->IsValid()) {
-        return false;
-    }
-
-    uint8_t magic[FOZ_REF_MAGIC_SIZE];
-    if (FD->Read(magic, FOZ_REF_MAGIC_SIZE) != FOZ_REF_MAGIC_SIZE) {
-        return false;
-    }
-
-    if (memcmp(magic, stream_reference_magic_and_version, FOZ_REF_MAGIC_SIZE - 1)) {
-        return false;
-    }
-
-    int version = magic[FOZ_REF_MAGIC_SIZE - 1];
-    if (version > FOSSILIZE_FORMAT_VERSION || version < FOSSILIZE_FORMAT_MIN_COMPAT_VERSION) {
-        return false;
-    }
-
-    return true;
-}
-
-bool DiskCacheFOZFile::CreateNew() {
-    File::FileModes Modes = File::FileModes::READ | File::FileModes::WRITE |
-                            File::FileModes::CREATE | File::FileModes::TRUNCATE; 
-
-    FD = fextl::make_unique<File::File>(FileName.c_str(), Modes);
-
-    if (!FD->IsValid()) {
-        return false;
-    }
-
-    if (FD->Write(stream_reference_magic_and_version, FOZ_REF_MAGIC_SIZE) != FOZ_REF_MAGIC_SIZE) {
-        return false;
-    }
-
-    return true;
-}
-
 bool DiskCacheFOZFile::Open(const fextl::string &FOZFileName, bool ReadOnly) {
     FileName = FOZFileName;
     this->ReadOnly = ReadOnly;
 
-    if (!OpenExisting()) {
-        if (ReadOnly) {
-            FD.reset();
-            return false;
-        } else {
-            if (!CreateNew()) {
-                FD.reset();
-                return false;
-            }
+    File::FileModes Modes = File::FileModes::READ;
+    if (!ReadOnly) {
+        Modes = Modes | File::FileModes::WRITE | File::FileModes::CREATE;
+    }
+    FD = fextl::make_unique<File::File>(FileName.c_str(), Modes);
+    if (!FD->IsValid()) {
+        FD.reset();
+        return false;
+    }
+
+    if (!ReadOnly && !FD->Lock(FOZ_LOCK_TIMEOUT_MS)) {
+        FD.reset();
+        return false;
+    }
+
+    bool Valid = false;
+    ssize_t Size = FD->Seek(0, File::SeekOp::END);
+    if (Size == 0 && !ReadOnly) {
+        Valid = FD->Write(stream_reference_magic_and_version, FOZ_REF_MAGIC_SIZE) == FOZ_REF_MAGIC_SIZE;
+    } else {
+        FD->Seek(0, File::SeekOp::BEGIN);
+        uint8_t magic[FOZ_REF_MAGIC_SIZE];
+        if (FD->Read(magic, FOZ_REF_MAGIC_SIZE) == FOZ_REF_MAGIC_SIZE &&
+            memcmp(magic, stream_reference_magic_and_version, FOZ_REF_MAGIC_SIZE - 1) == 0) {
+            int version = magic[FOZ_REF_MAGIC_SIZE - 1];
+            Valid = version <= FOSSILIZE_FORMAT_VERSION && version >= FOSSILIZE_FORMAT_MIN_COMPAT_VERSION;
         }
     }
-    return true;
+
+    if (!ReadOnly) {
+        FD->Unlock();
+    }
+
+    if (!Valid) {
+        FD.reset();
+    }
+    return Valid;
 }
 
 bool DiskCacheFOZFile::ReadNextBlob(foz_payload_key &OutKey, foz_payload_header &OutHeader, fextl::vector<uint8_t> &OutBlob) {
@@ -206,7 +188,7 @@ bool DiskCacheIndexedDB::StoreCacheBlob(const foz_payload_key &Key, std::span<co
         return true;
     }
 
-    if (!CacheFOZ.Lock() || !IndexFOZ.Lock()) {
+    if (!CacheFOZ.Lock(FOZ_LOCK_TIMEOUT_MS) || !IndexFOZ.Lock(FOZ_LOCK_TIMEOUT_MS)) {
         CacheFOZ.Unlock();
         IndexFOZ.Unlock();
         return false;
