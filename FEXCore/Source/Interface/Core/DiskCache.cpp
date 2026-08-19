@@ -422,6 +422,9 @@ bool DiskCache::Store(Core::InternalThreadState* Thread, const ExecutableFileSec
     if (!IsWritingDiskCache()) {
         return false;
     }
+    if (!DecodedBlockInfo) {
+        return false;
+    }
     std::lock_guard Guard(Lock);
 
     // check for any reloc targets outside of our jurisdiction
