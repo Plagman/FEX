@@ -378,7 +378,7 @@ public:
   FEXCore::HLE::SourcecodeResolver* SourcecodeResolver {};
   FEXCore::ThunkHandler* ThunkHandler {};
   fextl::unique_ptr<FEXCore::CPU::Dispatcher> Dispatcher;
-  DiskCache DiskCache;
+  DiskCache::DiskCache DiskCache;
   CodeCache CodeCache;
   fextl::unique_ptr<CodeMapWriter> CodeMapWriter;
 

@@ -20,8 +20,8 @@ $end_info$
 #include <cstdint>
 #include <span>
 
-namespace FEXCore {
-struct DiskCacheBlobEntryPoint;
+namespace FEXCore::DiskCache {
+struct BlobEntryPoint;
 }
 
 namespace FEXCore::CPU {
@@ -122,7 +122,7 @@ namespace CPU {
     virtual CompiledCode CompileCode(uint64_t Entry, uint64_t Size, bool SingleInst, const FEXCore::IR::IRListView* IR,
                                      FEXCore::Core::DebugData* DebugData, bool CheckTF) = 0;
 
-    virtual CompiledCode LoadCachedCode(std::span<const uint8_t> HostBytes, std::span<const DiskCacheBlobEntryPoint> EntryPoints) {
+    virtual CompiledCode LoadCachedCode(std::span<const uint8_t> HostBytes, std::span<const DiskCache::BlobEntryPoint> EntryPoints) {
       return {};
     }
 

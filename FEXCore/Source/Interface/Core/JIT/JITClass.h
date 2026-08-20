@@ -55,7 +55,7 @@ public:
                                        FEXCore::Core::DebugData* DebugData, bool CheckTF) override;
 
   [[nodiscard]]
-  CPUBackend::CompiledCode LoadCachedCode(std::span<const uint8_t> HostBytes, std::span<const DiskCacheBlobEntryPoint> EntryPoints) override;
+  CPUBackend::CompiledCode LoadCachedCode(std::span<const uint8_t> HostBytes, std::span<const DiskCache::BlobEntryPoint> EntryPoints) override;
 
   void ClearCache() override;
 

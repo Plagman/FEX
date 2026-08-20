@@ -861,7 +861,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
   }
 
   std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
-  std::optional<DiskCacheCodeHitData> Hit;
+  std::optional<DiskCache::CodeHitData> Hit;
   bool DiskCacheHitRelocationsApplied = false;
   bool LoadDiskCacheCode = true;
   if (Region && Region->FileStartVA != 0) {
